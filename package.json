@@ -1,0 +1,10 @@
+{
+  "name": "tianzifang-crowd",
+  "version": "1.0.0",
+  "description": "田子坊人流数据采集与分析",
+  "type": "module",
+  "dependencies": {
+    "sql.js": "^1.10.0",
+    "node-cron": "^3.0.0"
+  }
+}
