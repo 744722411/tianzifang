@@ -1,5 +1,8 @@
 import { BaseCollector } from './base.js';
 
+const TOURIST_API = 'https://tourist.whlyj.sh.gov.cn/api/statistics/getViewTourist';
+const TIANZIFANG_NAMES = ['上海田子坊景区', '田子坊'];
+
 export class GovTourCollector extends BaseCollector {
   constructor() {
     super();
@@ -13,22 +16,49 @@ export class GovTourCollector extends BaseCollector {
     const month = now.toLocaleDateString('en-US', { timeZone: 'Asia/Shanghai', month: 'numeric' }) * 1;
     const wd = weekday === 0 ? 6 : weekday - 1;
 
-    // 尝试抓取官方系统
+    // 官方数据源：上海市A级景区实时发布系统。
+    // 页面实际调用 /api/statistics/getViewTourist，返回全市A级景区实时客流；
+    // 其中田子坊记录 NAME=上海田子坊景区，字段 NUM=在园人数，MAX_NUM=瞬时最大承载量，SSD=舒适度。
     try {
-      const resp = await fetch('https://tourist.whlyj.sh.gov.cn', {
-        signal: AbortSignal.timeout(10000),
-        headers: { 'User-Agent': 'Mozilla/5.0' },
+      const resp = await fetch(TOURIST_API, {
+        signal: AbortSignal.timeout(15000),
+        headers: {
+          'User-Agent': 'Mozilla/5.0',
+          'Accept': 'application/json',
+          'Referer': 'https://tourist.whlyj.sh.gov.cn/MobileWebSite/Tourist_Main.html',
+        },
       });
+
       if (resp.ok) {
-        const text = await resp.text();
-        const match = text.match(/田子坊[\s\S]{0,200}?(\d+)/);
-        if (match) {
-          return [['in_park_count', parseInt(match[1]), '人', 'measured', { source: 'gov_tour' }]];
+        const data = await resp.json();
+        const rows = Array.isArray(data?.rows) ? data.rows : [];
+        const spot = rows.find(r => TIANZIFANG_NAMES.some(name => String(r.NAME || '').includes(name)));
+        if (spot && spot.NUM !== undefined && spot.NUM !== null) {
+          return [[
+            'in_park_count',
+            Number(spot.NUM),
+            '人',
+            'measured',
+            {
+              source: 'sh_a_scenic_realtime',
+              api: TOURIST_API,
+              code: spot.CODE,
+              name: spot.NAME,
+              time: spot.TIME,
+              grade: spot.GRADE,
+              comfort: spot.SSD,
+              max_num: spot.MAX_NUM,
+              type: spot.TYPE,
+              district: spot.DNAME,
+            },
+          ]];
         }
       }
-    } catch {}
+    } catch (e) {
+      // 失败时进入估算降级，避免采集中断。
+    }
 
-    // 降级：基于历史规律估算
+    // 降级：基于历史规律估算。官方接口失效时仍保留连续样本，但 confidence 会标注为 estimated。
     if (hour < 9 || hour > 22) {
       return [['in_park_count', 0, '人', 'estimated', { reason: 'outside_business_hours', hour }]];
     }

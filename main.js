@@ -4,16 +4,85 @@
  *
  * 用法:
  *   node main.js              # 采集一次
- *   node main.js --schedule   # 启动定时采集 (每天4次)
+ *   node main.js --schedule   # 启动定时采集 (06:00-22:00 每30分钟)
+ *   node main.js --summary    # 生成当天汇总
+ *   node main.js --report-yesterday  # 输出昨日统计报告
  *   node main.js --init       # 仅初始化数据库
  */
 import { initDb, saveDb } from './config/db.js';
-import { COLLECT_HOURS, AMAP_API_KEY } from './config/settings.js';
+import { AMAP_API_KEY } from './config/settings.js';
 import { GovTourCollector } from './collectors/gov_tour.js';
 import { WeatherCollector } from './collectors/weather.js';
 import { HolidayCollector } from './collectors/holiday.js';
 import { AmapCollector } from './collectors/amap.js';
 import cron from 'node-cron';
+
+function shanghaiDate(offsetDays = 0) {
+  const now = new Date();
+  const shNow = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Shanghai' }));
+  shNow.setDate(shNow.getDate() + offsetDays);
+  return shNow.toLocaleDateString('sv-SE');
+}
+
+async function runReport(dateStr) {
+  const db = await initDb();
+  const date = dateStr || shanghaiDate(-1);
+
+  const rows = db.exec(`
+    SELECT value, ts, confidence, raw_json FROM crowd_data
+    WHERE source = 'gov_tour' AND metric = 'in_park_count'
+    AND ts LIKE '${date}%'
+    ORDER BY ts
+  `);
+
+  if (!rows.length || !rows[0].values.length) {
+    console.log(`📊 田子坊昨日统计（${date}）`);
+    console.log('暂无采集数据。');
+    return;
+  }
+
+  const samples = rows[0].values
+    .filter(([value]) => value !== null)
+    .map(([value, ts, confidence, raw]) => {
+      let rawObj = {};
+      try { rawObj = raw ? JSON.parse(raw) : {}; } catch {}
+      return { value: Number(value), ts, confidence, raw: rawObj };
+    });
+
+  if (!samples.length) {
+    console.log(`📊 田子坊昨日统计（${date}）`);
+    console.log('暂无有效在园人数样本。');
+    return;
+  }
+
+  const values = samples.map(s => s.value);
+  const max = Math.max(...values);
+  const min = Math.min(...values);
+  const avg = Math.round(values.reduce((a, b) => a + b, 0) / values.length);
+  const peak = samples.reduce((best, cur) => cur.value > best.value ? cur : best, samples[0]);
+  const measured = samples.filter(s => s.confidence === 'measured').length;
+  const estimated = samples.filter(s => s.confidence === 'estimated').length;
+
+  console.log(`📊 田子坊昨日统计（${date}）`);
+  console.log(`- 样本数：${samples.length} 条（实测 ${measured}，估算 ${estimated}）`);
+  console.log(`- 最高在园：${Math.round(max)} 人（${peak.ts.substring(11, 16)}）`);
+  console.log(`- 平均在园：${avg} 人`);
+  console.log(`- 最低在园：${Math.round(min)} 人`);
+
+  const hourly = new Map();
+  for (const sample of samples) {
+    const hour = sample.ts.substring(11, 13);
+    if (!hourly.has(hour)) hourly.set(hour, []);
+    hourly.get(hour).push(sample.value);
+  }
+  const hourlyAvg = [...hourly.entries()].map(([hour, vals]) => [hour, Math.round(vals.reduce((a, b) => a + b, 0) / vals.length)]);
+  const topHours = hourlyAvg.sort((a, b) => b[1] - a[1]).slice(0, 3);
+  console.log(`- 高峰小时：${topHours.map(([hour, value]) => `${Number(hour)}点≈${value}人`).join('；')}`);
+
+  const last = samples[samples.length - 1];
+  const comfort = last.raw?.comfort ? `，舒适度：${last.raw.comfort}` : '';
+  console.log(`- 最后采样：${last.ts.substring(11, 16)}，${Math.round(last.value)} 人${comfort}`);
+}
 
 function log(msg) {
   console.log(`[${new Date().toLocaleString('sv-SE', { timeZone: 'Asia/Shanghai' })}] ${msg}`);
@@ -52,36 +121,51 @@ async function runCollection() {
   return total;
 }
 
-async function runDailySummary() {
+async function runDailySummary(dateStr = null) {
   const db = await initDb();
-  const today = new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Shanghai' });
+  const today = dateStr || new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Shanghai' });
   log(`生成 ${today} 日汇总...`);
 
+  // 田子坊官方实时页经常不可抓取，gov_tour 会降级为 estimated。
+  // 预测系统需要 daily_summary 做基线，因此这里保留所有 confidence，
+  // 并在 notes 中记录 measured/scraped/estimated 的构成。
   const rows = db.exec(`
-    SELECT value, ts FROM crowd_data
+    SELECT value, ts, confidence FROM crowd_data
     WHERE source = 'gov_tour' AND metric = 'in_park_count'
-    AND date(ts) = '${today}'
-    AND confidence IN ('measured', 'scraped')
+    AND ts LIKE '${today}%'
     ORDER BY ts
   `);
 
   if (rows.length > 0 && rows[0].values.length > 0) {
-    const values = rows[0].values.map(r => r[0]).filter(v => v !== null);
-    if (values.length > 0) {
+    const samples = rows[0].values
+      .filter(([value]) => value !== null)
+      .map(([value, ts, confidence]) => ({ value: Number(value), ts, confidence }));
+    if (samples.length > 0) {
+      const values = samples.map(s => s.value);
       const maxCrowd = Math.max(...values);
       const avgCrowd = Math.round(values.reduce((a, b) => a + b, 0) / values.length);
       const totalVisitors = Math.round(values.reduce((a, b) => a + b, 0));
+      const peak = samples.reduce((best, cur) => cur.value > best.value ? cur : best, samples[0]);
+      const peakHour = peak.ts ? Number(peak.ts.substring(11, 13)) : null;
+      const weekday = new Date(`${today}T12:00:00+08:00`).getDay();
+      const wd = weekday === 0 ? 6 : weekday - 1;
+      const confidenceCounts = samples.reduce((acc, s) => {
+        acc[s.confidence || 'unknown'] = (acc[s.confidence || 'unknown'] || 0) + 1;
+        return acc;
+      }, {});
+      const notes = `auto_summary; samples=${samples.length}; confidence=${JSON.stringify(confidenceCounts)}`;
 
       db.run(`
-        INSERT OR REPLACE INTO daily_summary (date, weekday, max_crowd, avg_crowd, total_visitors)
-        VALUES (?, ?, ?, ?, ?)
-      `, [today, new Date().getDay(), maxCrowd, avgCrowd, totalVisitors]);
+        INSERT OR REPLACE INTO daily_summary
+        (date, weekday, max_crowd, avg_crowd, peak_hour, total_visitors, notes)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `, [today, wd, maxCrowd, avgCrowd, peakHour, totalVisitors, notes]);
 
       saveDb(db);
-      log(`  汇总: 最大${maxCrowd} 均值${avgCrowd}`);
+      log(`  汇总: 样本${samples.length} 最大${maxCrowd} 均值${avgCrowd} 峰值${peakHour}时`);
     }
   } else {
-    log('  当天无实测数据');
+    log('  当天无在园人数数据');
   }
 }
 
@@ -94,15 +178,25 @@ async function main() {
     return;
   }
 
+  if (args.includes('--summary')) {
+    await runDailySummary();
+    return;
+  }
+
+  if (args.includes('--report-yesterday')) {
+    const yesterday = shanghaiDate(-1);
+    await runDailySummary(yesterday);
+    await runReport(yesterday);
+    return;
+  }
+
   if (args.includes('--schedule')) {
     await runCollection();
 
-    // 每天4次采集
-    for (const hour of COLLECT_HOURS) {
-      const expr = `0 ${hour} * * *`;
-      cron.schedule(expr, () => runCollection(), { timezone: 'Asia/Shanghai' });
-      log(`定时任务: 每天 ${hour}:00 采集`);
-    }
+    // 06:00-21:30 每30分钟，另在22:00采集一次
+    cron.schedule('0,30 6-21 * * *', () => runCollection(), { timezone: 'Asia/Shanghai' });
+    cron.schedule('0 22 * * *', () => runCollection(), { timezone: 'Asia/Shanghai' });
+    log('定时任务: 每天 06:00-22:00 每30分钟采集');
 
     // 每天23:30生成日汇总
     cron.schedule('30 23 * * *', () => runDailySummary(), { timezone: 'Asia/Shanghai' });
@@ -113,6 +207,7 @@ async function main() {
     setInterval(() => {}, 60000);
   } else {
     await runCollection();
+    await runDailySummary();
   }
 }
 
