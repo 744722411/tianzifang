@@ -28,7 +28,7 @@ async function runReport(dateStr) {
   const db = await initDb();
   const date = dateStr || shanghaiDate(-1);
 
-  const rows = db.exec(`
+  const rows = await db.exec(`
     SELECT value, ts, confidence, raw_json FROM crowd_data
     WHERE source = 'gov_tour' AND metric = 'in_park_count'
     AND ts LIKE '${date}%'
@@ -134,7 +134,7 @@ async function runCollection(skipAmap = false) {
   for (const c of collectors) {
     try {
       const records = await c.collect();
-      const count = c.save(db, records);
+      const count = await c.save(db, records);
       total += count;
       log(`  [${c.name}] ${count} 条记录`);
     } catch (e) {
@@ -155,7 +155,7 @@ async function runDailySummary(dateStr = null) {
   // 田子坊官方实时页经常不可抓取，gov_tour 会降级为 estimated。
   // 预测系统需要 daily_summary 做基线，因此这里保留所有 confidence，
   // 并在 notes 中记录 measured/scraped/estimated 的构成。
-  const rows = db.exec(`
+  const rows = await db.exec(`
     SELECT value, ts, confidence FROM crowd_data
     WHERE source = 'gov_tour' AND metric = 'in_park_count'
     AND ts LIKE '${today}%'
@@ -181,10 +181,17 @@ async function runDailySummary(dateStr = null) {
       }, {});
       const notes = `auto_summary; samples=${samples.length}; confidence=${JSON.stringify(confidenceCounts)}`;
 
-      db.run(`
-        INSERT OR REPLACE INTO daily_summary
+      await db.run(`
+        INSERT INTO daily_summary
         (date, weekday, max_crowd, avg_crowd, peak_hour, total_visitors, notes)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        ON CONFLICT (date) DO UPDATE SET
+          weekday = EXCLUDED.weekday,
+          max_crowd = EXCLUDED.max_crowd,
+          avg_crowd = EXCLUDED.avg_crowd,
+          peak_hour = EXCLUDED.peak_hour,
+          total_visitors = EXCLUDED.total_visitors,
+          notes = EXCLUDED.notes
       `, [today, wd, maxCrowd, avgCrowd, peakHour, totalVisitors, notes]);
 
       saveDb(db);

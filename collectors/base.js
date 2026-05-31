@@ -34,17 +34,16 @@ export class BaseCollector {
     return resp.text();
   }
 
-  save(db, records) {
+  async save(db, records) {
     const ts = this.nowISO();
-    const stmt = db.prepare(
-      'INSERT INTO crowd_data (ts, source, metric, value, unit, confidence, raw_json) VALUES (?,?,?,?,?,?,?)'
-    );
     let count = 0;
     for (const [metric, value, unit, confidence, raw] of records) {
-      stmt.run([ts, this.name, metric, value, unit, confidence, raw ? JSON.stringify(raw) : null]);
+      await db.run(
+        'INSERT INTO crowd_data (ts, source, metric, value, unit, confidence, raw_json) VALUES ($1, $2, $3, $4, $5, $6, $7)',
+        [ts, this.name, metric, value, unit, confidence, raw ? JSON.stringify(raw) : null]
+      );
       count++;
     }
-    stmt.free();
     return count;
   }
 }
