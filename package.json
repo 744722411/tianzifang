@@ -15,12 +15,12 @@
     "node": ">=20.19.0"
   },
   "scripts": {
-    "start": "node main.js --schedule",
-    "collect": "node main.js",
-    "init": "node main.js --init",
-    "summary": "node main.js --summary",
-    "report:yesterday": "node main.js --report-yesterday",
-    "query": "node analysis/query.js",
+    "start": "node --env-file=.env main.js --schedule",
+    "collect": "node --env-file=.env main.js",
+    "init": "node --env-file=.env main.js --init",
+    "summary": "node --env-file=.env main.js --summary",
+    "report:yesterday": "node --env-file=.env main.js --report-yesterday",
+    "query": "node --env-file=.env analysis/query.js",
     "lint": "biome check .",
     "format": "biome format --write .",
     "test": "vitest run",
